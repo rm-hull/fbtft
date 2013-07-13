@@ -38,6 +38,9 @@
 
 #include "fbtft.h"
 
+extern void fbtft_sysfs_init(struct fbtft_par *par);
+extern void fbtft_sysfs_exit(struct fbtft_par *par);
+extern int fbtft_gamma_parse_str(struct fbtft_par *par, unsigned long *curves, const char *str, int size);
 
 // This will be used if the driver doesn't provide debug support
 #ifdef DEBUG
@@ -493,7 +496,7 @@ int fbtft_fb_blank(int blank, struct fb_info *info)
 	fbtft_fbtft_dev_dbg(DEBUG_FB_BLANK, par, info->dev, "%s(blank=%d)\n", __func__, blank);
 
 	if (!par->fbtftops.blank)
-		return 0;
+		return ret;
 
 	switch (blank) {
 	case FB_BLANK_POWERDOWN:
@@ -546,6 +549,14 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display, struct de
 	bool bgr = false;
 	u8 startbyte = 0;
 	int vmem_size;
+	char *gamma = display->gamma;
+	unsigned long *gamma_curves = NULL;
+
+	/* sanity check */
+	if (display->gamma_num * display->gamma_len > FBTFT_GAMMA_MAX_VALUES_TOTAL) {
+		dev_err(dev, "%s: FBTFT_GAMMA_MAX_VALUES_TOTAL=%d is exceeded\n", __func__, FBTFT_GAMMA_MAX_VALUES_TOTAL);
+		return NULL;
+	}
 
 	/* defaults */
 	if (!fps)
@@ -564,6 +575,8 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display, struct de
 		rotate = pdata->rotate & 3;
 		bgr = pdata->bgr;
 		startbyte = pdata->startbyte;
+		if (pdata->gamma)
+			gamma = pdata->gamma;
 	}
 
 	switch (rotate) {
@@ -592,6 +605,12 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display, struct de
 	buf = vzalloc(128);
 	if (!buf)
 		goto alloc_fail;
+
+	if (display->gamma_num && display->gamma_len) {
+		gamma_curves = kzalloc(display->gamma_num * display->gamma_len * sizeof(gamma_curves[0]), GFP_KERNEL);
+		if (!gamma_curves)
+			goto alloc_fail;
+	}
 
 	info = framebuffer_alloc(sizeof(struct fbtft_par), dev);
 	if (!info)
@@ -654,8 +673,14 @@ struct fb_info *fbtft_framebuffer_alloc(struct fbtft_display *display, struct de
 	par->dirty_lines_end = par->info->var.yres - 1;
 	par->bgr = bgr;
 	par->startbyte = startbyte;
+	par->gamma.curves = gamma_curves;
+	par->gamma.num_curves = display->gamma_num;
+	par->gamma.num_values = display->gamma_len;
+	mutex_init(&par->gamma.lock);
+	info->pseudo_palette = par->pseudo_palette;
 
-    info->pseudo_palette = par->pseudo_palette;
+	if (par->gamma.curves && gamma)
+		fbtft_gamma_parse_str(par, par->gamma.curves, gamma, strlen(gamma));
 
 	// Transmit buffer
 	if (txbuflen == -1)
@@ -700,6 +725,8 @@ alloc_fail:
 		kfree(fbops);
 	if (fbdefio)
 		kfree(fbdefio);
+	if (gamma_curves)
+		kfree(gamma_curves);
 
 	return NULL;
 }
@@ -722,6 +749,9 @@ void fbtft_framebuffer_release(struct fb_info *info)
 	vfree(par->buf);
 	kfree(info->fbops);
 	kfree(info->fbdefio);
+	if (par->gamma.curves) {
+		kfree(par->gamma.curves);
+	}
 	framebuffer_release(info);
 }
 EXPORT_SYMBOL(fbtft_framebuffer_release);
@@ -776,12 +806,20 @@ int fbtft_register_framebuffer(struct fb_info *fb_info)
 
 	par->fbtftops.update_display(par);
 
+	if (par->fbtftops.set_gamma && par->gamma.curves) {
+		ret = par->fbtftops.set_gamma(par, par->gamma.curves);
+		if (ret)
+			goto reg_fail;
+	}
+
 	if (par->fbtftops.register_backlight)
 		par->fbtftops.register_backlight(par);
 
 	ret = register_framebuffer(fb_info);
 	if (ret < 0)
 		goto reg_fail;
+
+	fbtft_sysfs_init(par);
 
 	if (par->txbuf.buf)
 		sprintf(text1, ", %d KiB buffer memory", par->txbuf.len >> 10);
@@ -830,6 +868,7 @@ int fbtft_unregister_framebuffer(struct fb_info *fb_info)
 		spi_set_drvdata(spi, NULL);
 	if (par->pdev)
 		platform_set_drvdata(par->pdev, NULL);
+	fbtft_sysfs_exit(par);
 	par->fbtftops.free_gpios(par);
 	ret = unregister_framebuffer(fb_info);
 	if (par->fbtftops.unregister_backlight)

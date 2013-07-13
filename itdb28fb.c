@@ -35,20 +35,13 @@
 #define HEIGHT      320
 #define BPP         16
 #define FPS         20
+#define GAMMA       "0F 00 7 2 0 0 6 5 4 1\n" \
+                    "04 16 2 7 6 3 2 1 7 7"
 
 
 /* Module Parameter: debug  (also available through sysfs) */
 MODULE_PARM_DEBUG;
 
-/* Module Parameter: rotate */
-static unsigned rotate = 0;
-module_param(rotate, uint, 0);
-MODULE_PARM_DESC(rotate, "Rotate display (0=normal, 1=clockwise, 2=upside down, 3=counterclockwise)");
-
-/* Module Parameter: gamma */
-static unsigned gamma = 1;
-module_param(gamma, uint, 0);
-MODULE_PARM_DESC(gamma, "Gamma profile (0=off, 1=default, 2..X=alternatives)");
 
 /* Power supply configuration */
 #define ILI9325_BT  6        /* VGL=Vci*4 , VGH=Vci*4 */
@@ -95,24 +88,6 @@ VCOM driver output voltage
 VCOMH - VCOML < 6.0   =>  4.79 < 6.0
 */
 
-static const u16 gamma_registers[] = {
-   0x0030,0x0031,0x0032,0x0035,0x0036,0x0037,0x0038,0x0039,0x003C,0x003D
-};
-
-static const u16 gamma_profiles[][10] = {
-// KP1/0  KP3/2  KP5/4  RP1/0  VRP1/0 KN1/0  KN3/2  KN5/4  RN1/0  VRN1/0
-  {}, // Off
-  {0x0000,0x0506,0x0104,0x0207,0x000F,0x0306,0x0102,0x0707,0x0702,0x1604}, // Default
-  {0x0000,0x0203,0x0001,0x0205,0x030C,0x0607,0x0405,0x0707,0x0502,0x1008}, // http://spritesmods.com/rpi_arcade/ili9325_gpio_driver_rpi.diff
-  {0x0107,0x0306,0x0207,0x0206,0x0408,0x0106,0x0102,0x0207,0x0504,0x0503}, // http://pastebin.com/HDsQ2G35
-  {0x0006,0x0101,0x0003,0x0106,0x0b02,0x0302,0x0707,0x0007,0x0600,0x020b}, // http://andybrown.me.uk/wk/2012/01/01/stm32plus-ili9325-tft-driver/
-  {0x0000,0x0000,0x0000,0x0206,0x0808,0x0007,0x0201,0x0000,0x0000,0x0000}, // http://mbed.org/forum/mbed/topic/3655/?page=1
-  {0x0007,0x0302,0x0105,0x0206,0x0808,0x0206,0x0504,0x0007,0x0105,0x0808}, // https://bitbucket.org/plumbum/ttgui/src/eb58fe3a9401/firmware/gui/lcd_hw_ili9325.c?at=master
-  {0x0000,0x0107,0x0000,0x0203,0x0402,0x0000,0x0207,0x0000,0x0203,0x0403},
-  {0x0000,0x0505,0x0004,0x0006,0x0707,0x0105,0x0002,0x0707,0x0704,0x0807}, // ILI9320 2.4" LCD
-  {0x0504,0x0703,0x0702,0x0101,0x0A1F,0x0504,0x0003,0x0706,0x0707,0x091F}, // ILI9320 2.8" LCD
-};
-
 static int itdb28fb_init_display(struct fbtft_par *par)
 {
     int i;
@@ -132,7 +107,7 @@ static int itdb28fb_init_display(struct fbtft_par *par)
 	write_reg(par, 0x00EF, 0x1231); /* Set internal timing */
 	write_reg(par, 0x0001, 0x0100); /* set SS and SM bit */
 	write_reg(par, 0x0002, 0x0700); /* set 1 line inversion */
-	switch (rotate) {
+	switch (par->info->var.rotate) {
 	/* AM: GRAM update direction: horiz/vert. I/D: Inc/Dec address counter */
 	case 0:
 		write_reg(par, 0x03, 0x1030);
@@ -173,13 +148,6 @@ static int itdb28fb_init_display(struct fbtft_par *par)
 	write_reg(par, 0x0020, 0x0000); /* GRAM horizontal Address */
 	write_reg(par, 0x0021, 0x0000); /* GRAM Vertical Address */
 
-	/* ----------- Adjust the Gamma Curve ---------- */
-    if (gamma > 0) {
-        for (i=0; i<10; i++) {
-            write_reg(par, gamma_registers[i], gamma_profiles[gamma][i]);
-        }
-    }
-
 	/*------------------ Set GRAM area --------------- */
 	write_reg(par, 0x0050, 0x0000); /* Horizontal GRAM Start Address */
 	write_reg(par, 0x0051, 0x00EF); /* Horizontal GRAM End Address */
@@ -205,10 +173,45 @@ static int itdb28fb_init_display(struct fbtft_par *par)
 	return 0;
 }
 
+/*
+  Gamma string format:
+    VRP0 VRP1 RP0 RP1 KP0 KP1 KP2 KP3 KP4 KP5 KP6
+    VRN0 VRN1 RN0 RN1 KN0 KN1 KN2 KN3 KN4 KN5 KN6
+*/
+#define CURVE(num, idx)  curves[num*par->gamma.num_values + idx]
+static int set_gamma(struct fbtft_par *par, unsigned long *curves)
+{
+	unsigned long mask[] = { 0b11111, 0b11111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111, \
+	                         0b11111, 0b11111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111, 0b111 };
+	int i,j;
+
+	fbtft_dev_dbg(DEBUG_INIT_DISPLAY, par->info->device, "%s()\n", __func__);
+
+	/* apply mask */
+	for (i=0;i<2;i++)
+		for (j=0;j<10;j++)
+			CURVE(i,j) &= mask[i*par->gamma.num_values + j];
+
+	write_reg(par, 0x0030, CURVE(0, 5) << 8 | CURVE(0, 4) );
+	write_reg(par, 0x0031, CURVE(0, 7) << 8 | CURVE(0, 6) );
+	write_reg(par, 0x0032, CURVE(0, 9) << 8 | CURVE(0, 8) );
+	write_reg(par, 0x0035, CURVE(0, 3) << 8 | CURVE(0, 2) );
+	write_reg(par, 0x0036, CURVE(0, 1) << 8 | CURVE(0, 0) );
+
+	write_reg(par, 0x0037, CURVE(1, 5) << 8 | CURVE(1, 4) );
+	write_reg(par, 0x0038, CURVE(1, 7) << 8 | CURVE(1, 6) );
+	write_reg(par, 0x0039, CURVE(1, 9) << 8 | CURVE(1, 8) );
+	write_reg(par, 0x003C, CURVE(1, 3) << 8 | CURVE(1, 2) );
+	write_reg(par, 0x003D, CURVE(1, 1) << 8 | CURVE(1, 0) );
+
+	return 0;
+}
+#undef CURVE
+
 static void itdb28fb_set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
 {
 	fbtft_dev_dbg(DEBUG_SET_ADDR_WIN, par->info->device, "%s(xs=%d, ys=%d, xe=%d, ye=%d)\n", __func__, xs, ys, xe, ye);
-	switch (rotate) {
+	switch (par->info->var.rotate) {
 	/* R20h = Horizontal GRAM Start Address */
 	/* R21h = Vertical GRAM Start Address */
 	case 0:
@@ -309,8 +312,13 @@ static struct attribute_group itdb28fb_attr_group = {
 
 
 struct fbtft_display itdb28fb_display = {
+	.width = WIDTH,
+	.height = HEIGHT,
 	.bpp = BPP,
 	.fps = FPS,
+	.gamma_num = 2,
+	.gamma_len = 10,
+	.gamma = GAMMA,
 };
 
 static int itdb28fb_probe_common(struct spi_device *sdev, struct platform_device *pdev)
@@ -319,7 +327,6 @@ static int itdb28fb_probe_common(struct spi_device *sdev, struct platform_device
 	struct fb_info *info;
 	struct fbtft_par *par;
 	int ret;
-    int num_profiles = sizeof(gamma_profiles)/sizeof(gamma_profiles[0]);
 
 	if (sdev)
 		dev = &sdev->dev;
@@ -328,33 +335,10 @@ static int itdb28fb_probe_common(struct spi_device *sdev, struct platform_device
 
 	fbtft_dev_dbg(DEBUG_DRIVER_INIT_FUNCTIONS, dev, "%s()\n", __func__);
 
-	if (gamma >= num_profiles) {
-		dev_warn(&pdev->dev, "module parameter 'gamma' illegal value: %d. Can only be 0-%d. Setting it to 1.\n", gamma, num_profiles-1);
-		gamma = 1;
-	}
-
-	if (rotate > 3) {
-		dev_warn(dev, "module parameter 'rotate' illegal value: %d. Can only be 0,1,2,3. Setting it to 0.\n", rotate);
-		rotate = 0;
-	}
-	switch (rotate) {
-	case 0:
-	case 2:
-		itdb28fb_display.width = WIDTH;
-		itdb28fb_display.height = HEIGHT;
-		break;
-	case 1:
-	case 3:
-		itdb28fb_display.width = HEIGHT;
-		itdb28fb_display.height = WIDTH;
-		break;
-	}
-
 	info = fbtft_framebuffer_alloc(&itdb28fb_display, dev);
 	if (!info)
 		return -ENOMEM;
 
-	info->var.rotate = rotate;
 	par = info->par;
 	if (sdev)
 		par->spi = sdev;
@@ -363,6 +347,7 @@ static int itdb28fb_probe_common(struct spi_device *sdev, struct platform_device
 
 	fbtft_debug_init(par);
 	par->fbtftops.init_display = itdb28fb_init_display;
+	par->fbtftops.set_gamma = set_gamma;
 	par->fbtftops.register_backlight = fbtft_register_backlight;
 	par->fbtftops.write_reg = fbtft_write_reg16_bus8;
 	par->fbtftops.set_addr_win = itdb28fb_set_addr_win;

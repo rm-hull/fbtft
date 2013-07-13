@@ -65,6 +65,10 @@ static unsigned fps = 0;
 module_param(fps, uint, 0);
 MODULE_PARM_DESC(fps, "Frames per second (override driver default)");
 
+static char *gamma = NULL;
+module_param(gamma, charp, 0);
+MODULE_PARM_DESC(gamma, "String representation of Gamma Curve(s). Driver specific.");
+
 static int txbuflen = 0;
 module_param(txbuflen, int, 0);
 MODULE_PARM_DESC(txbuflen, "txbuflen (override driver default)");
@@ -364,7 +368,7 @@ static int __init fbtft_device_init(void)
 {
 	struct spi_master *master = NULL;
 	struct spi_board_info *display = NULL;
-	const struct fbtft_platform_data *pdata = NULL;
+	struct fbtft_platform_data *pdata = NULL;
 	const struct fbtft_gpio *gpio = NULL;
 	char *p_name, *p_num;
 	bool found = false;
@@ -451,14 +455,15 @@ static int __init fbtft_device_init(void)
 				display->mode = mode;
 			if (pdata)
 				display->platform_data = pdata;
-			pdata = display->platform_data;
-			((struct fbtft_platform_data *)pdata)->rotate = rotate;
-			((struct fbtft_platform_data *)pdata)->bgr = bgr;
-			((struct fbtft_platform_data *)pdata)->startbyte = startbyte;
+			pdata = (void *)display->platform_data;
+			pdata->rotate = rotate;
+			pdata->bgr = bgr;
+			pdata->startbyte = startbyte;
+			pdata->gamma = gamma;
 			if (fps)
-				((struct fbtft_platform_data *)pdata)->fps = fps;
+				pdata->fps = fps;
 			if (txbuflen)
-				((struct fbtft_platform_data *)pdata)->txbuflen = txbuflen;
+				pdata->txbuflen = txbuflen;
 			spi_device = spi_new_device(master, display);
 			put_device(&master->dev);
 			if (!spi_device) {
@@ -475,21 +480,22 @@ static int __init fbtft_device_init(void)
 		for (i=0; i < ARRAY_SIZE(fbtft_device_pdev_displays); i++) {
 			if (strncmp(name, fbtft_device_pdev_displays[i].name, 32) == 0) {
 				p_device = &fbtft_device_pdev_displays[i];
+				if (pdata)
+					p_device->dev.platform_data = (void *)pdata;
+				pdata = p_device->dev.platform_data;
+				pdata->rotate = rotate;
+				pdata->bgr = bgr;
+				pdata->startbyte = startbyte;
+				pdata->gamma = gamma;
+				if (fps)
+					pdata->fps = fps;
+				if (txbuflen)
+					pdata->txbuflen = txbuflen;
 				ret = platform_device_register(p_device);
 				if (ret < 0) {
 					pr_err(DRVNAME":    platform_device_register() returned %d\n", ret);
 					return ret;
 				}
-				if (pdata)
-					p_device->dev.platform_data = (void *)pdata;
-				pdata = p_device->dev.platform_data;
-				((struct fbtft_platform_data *)pdata)->rotate = rotate;
-				((struct fbtft_platform_data *)pdata)->bgr = bgr;
-				((struct fbtft_platform_data *)pdata)->startbyte = startbyte;
-				if (fps)
-					((struct fbtft_platform_data *)pdata)->fps = fps;
-				if (txbuflen)
-					((struct fbtft_platform_data *)pdata)->txbuflen = txbuflen;
 				found = true;
 				break;
 			}
